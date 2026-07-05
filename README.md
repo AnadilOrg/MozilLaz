@@ -161,7 +161,7 @@ MozilLaz/
 
 ## 🌍 Dil Notu
 
-Lazca (ISO 639-3: **lzz**), Karadeniz bölgesinde konuşulan Kolkis dilidir. Bu model **Mozilla'nın açık kaynak Lazca veri setleri** kullanılarak eğitilmiştir ve **tek konuşucu** modeli olarak sunulur.
+Lazca (ISO 639-3: **lzz**), Karadeniz bölgesinde konuşulan Kolhis dilidir. Bu model **Mozilla'nın açık kaynak Lazca veri setleri** kullanılarak eğitilmiştir ve **tek konuşucu** modeli olarak sunulur.
 
 ## 📝 Lisans
 
