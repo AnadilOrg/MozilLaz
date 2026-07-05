@@ -71,7 +71,7 @@ sf.write("output.wav", audio.cpu().numpy(), 48000)
 print("✅ Ses üretildi! output.wav dosyasına kaydedildi.")
 ```
 
-<audio controls="" src="sample/1.wav"></audio>
+<audio controls="" src="/Anadilorg/MozilLaz/resolve/main/sample/1.wav"></audio>
 
 ### Batch inference
 
