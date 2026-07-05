@@ -51,16 +51,26 @@ python inference.py --text "[speaker:spk_tmp_001 language:lzz] Metin burada" --o
 
 ### Python API
 
-```python
-from voxcpm.model import VoxCPM2Model
-from peft import PeftModel
+Ağırlıklar `peft` formatında değildir; `voxcpm` paketinin kendi (native) LoRA
+desteğiyle yüklenir:
 
-base = VoxCPM2Model.from_pretrained("openbmb/voxcpm2")
-model = PeftModel.from_pretrained(base, ".")
-model.eval().to("cuda")
+```python
+import json
+from voxcpm import VoxCPM
+from voxcpm.model.voxcpm import LoRAConfig
+
+with open("lora_config.json") as f:
+    lc = json.load(f)["lora_config"]
+cfg = LoRAConfig(**{k: v for k, v in lc.items() if k in LoRAConfig.model_fields})
+
+model = VoxCPM.from_pretrained(
+    "openbmb/VoxCPM2",
+    lora_config=cfg,
+    lora_weights_path="lora_weights.safetensors",
+)
 
 audio = model.generate(
-    target_text="[speaker:spk_tmp_001 language:lzz] Nanışkimi uç den ikayme.",
+    text="[speaker:spk_tmp_001 language:lzz] Nanışkimi uç den ikayme.",
     inference_timesteps=10,
     cfg_value=2.0
 )

@@ -7,6 +7,8 @@ Yüklemek için: pip install gradio
 
 Çalıştırma:
     python demo.py
+    python demo.py --port 7861
+    python demo.py --share
 
 Ardından tarayıcınızda http://localhost:7860 adresine gidin.
 """
@@ -19,8 +21,6 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-import torch
-import transformers
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -32,6 +32,8 @@ except ImportError:
     print("\nYa da CLI kullanın: python inference.py --text '...'")
     sys.exit(1)
 
+# inference.py'deki doğrulanmış yükleyiciyi yeniden kullan
+from inference import DEFAULT_BASE_MODEL, load_model, resolve_device
 
 # Lazca örnek cümleler
 LAZCA_SAMPLES = [
@@ -47,77 +49,50 @@ def load_model_once():
     """Modeli hafızada tut (her seferinde tekrar yükleme)."""
     if not hasattr(load_model_once, "_model"):
         script_dir = Path(__file__).parent
-        lora_path = script_dir / "lora_weights.safetensors"
         config_path = script_dir / "config.json"
 
+        base_model_name = DEFAULT_BASE_MODEL
         if config_path.exists():
-            with open(config_path) as f:
-                config = json.load(f)
-            base_model_name = config.get("base_model", "facebook/voxcpm2")
-        else:
-            base_model_name = "facebook/voxcpm2"
+            with open(config_path, encoding="utf-8") as f:
+                base_model_name = json.load(f).get("base_model", DEFAULT_BASE_MODEL)
 
-        # VoxCPM2 model sınıfını bul
-        model_class = None
-        for import_path in ["voxcpm.model", "voxcpm"]:
-            try:
-                model_class = getattr(__import__(import_path, fromlist=[""]), "VoxCPM2Model") or \
-                               getattr(__import__(import_path, fromlist=[""]), "VoxCPMModel")
-                break
-            except ImportError:
-                continue
-
-        if model_class is None:
-            raise ImportError("voxcpm paketi bulunamadı. pip install voxcpm yapın.")
-
-        print(f"Base model: {base_model_name}")
-        load_model_once._model = model_class.from_pretrained(base_model_name)
-
-        # LoRA yükle
-        print(f"LoRA: {lora_path}")
-        load_model_once._model.load_lora(str(lora_path))
-        load_model_once._model.eval()
-        if torch.cuda.is_available():
-            load_model_once._model = load_model_once._model.to("cuda")
-
+        load_model_once._model = load_model(
+            base_model_name,
+            lora_config_path=script_dir / "lora_config.json",
+            lora_weights_path=script_dir / "lora_weights.safetensors",
+            device=resolve_device("auto"),
+        )
     return load_model_once._model
 
 
 def synthesize(text: str, timesteps: int, cfg_value: float):
-    """Metinden ses üret ve WAV tempfile döndür."""
+    """Metinden ses üret ve WAV dosya yolu döndür."""
     if not text.strip():
         return None
 
     model = load_model_once()
+    audio = model.generate(
+        text=text,
+        inference_timesteps=int(timesteps),
+        cfg_value=float(cfg_value),
+    )
+    audio = np.asarray(audio).squeeze()
+    sample_rate = getattr(getattr(model, "tts_model", None), "sample_rate", 48000)
 
-    with torch.no_grad():
-        audio = model.generate(
-            target_text=text,
-            inference_timesteps=timesteps,
-            cfg_value=cfg_value
-        )
-
-    if hasattr(audio, "cpu"):
-        audio = audio.cpu()
-    if isinstance(audio, torch.Tensor):
-        audio = audio.squeeze(0).numpy()
-
-    # WAV dosyasına kaydet
     tmp_path = "/tmp/mozilaz_demo.wav"
-    sf.write(tmp_path, audio, 48000)
+    sf.write(tmp_path, audio, sample_rate)
     return tmp_path
 
 
-def gradio_interface():
+def gradio_interface(port: int = 7860, share: bool = False):
     """Gradio UI oluştur."""
     examples = LAZCA_SAMPLES
 
-    with gr.Blocks(title="MozilLaz — Lazca TTS",
-                   gr.themes.Soft()) as demo:
+    with gr.Blocks(title="MozilLaz — Lazca TTS", theme=gr.themes.Soft()) as demo:
         gr.Markdown("""
 # 🎙️ MozilLaz — Lazca Text-to-Speech
 
-**Lazca açık kaynak TTS modeli** (VoxCPM2 + LoRA, 21.000 eğitim örneği)
+**Lazca açık kaynak TTS modeli** (VoxCPM2 + LoRA, ~21.000 eğitim örneği)
 
 > *İpucu:* Aşağıdaki örneklerden birine tıklayın veya kendi Lazca metninizi yazın!
 """)
@@ -153,9 +128,9 @@ def gradio_interface():
             outputs=audio_output
         )
 
-        gr.Markdown("""
+        gr.Markdown(f"""
 ### Teknik Detaylar
-- **Base Model:** [VoxCPM2 (Facebook)](https://huggingface.co/facebook/voxcpm2)
+- **Base Model:** [VoxCPM2 (OpenBMB)](https://huggingface.co/openbmb/VoxCPM2)
 - **LoRA Rank:** 32, **Alpha:** 32
 - **Eğitim Verisi:** ~21.000 Mozilla Lazca segment
 - **Sample Rate:** 48 kHz
@@ -163,14 +138,14 @@ def gradio_interface():
 
 ### Kurulum
 ```bash
-pip install torch torchaudio soundfile voxcpm peft safetensors
-git clone https://huggingface.co/username/MozilLaz
+pip install torch torchaudio soundfile safetensors numpy voxcpm gradio
+git clone https://huggingface.co/Anadilorg/MozilLaz
 cd MozilLaz
 python demo.py
 ```
 """)
 
-    demo.launch(share=False)
+    demo.launch(server_port=port, share=share)
 
 
 if __name__ == "__main__":
@@ -179,4 +154,4 @@ if __name__ == "__main__":
     parser.add_argument("--share", action="store_true", help="Public share link oluştur")
     args = parser.parse_args()
 
-    gradio_interface()
+    gradio_interface(port=args.port, share=args.share)

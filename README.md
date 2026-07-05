@@ -1,36 +1,22 @@
 # MozilLaz — Lazcanın Açık Kaynak Text-to-Speech Modeli
 
-MozilLaz, [VoxCPM2](https://huggingface.co/openbmb/voxcpm2) üzerine LoRA fine-tuning ile eğitilmiş, **Lazca (lzz)** konuşma sentezi modeli. Mozilla'nın açık kaynak Lazca veri setleri kullanılarak eğitilmiştir.
+MozilLaz, [VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) üzerine LoRA fine-tuning ile eğitilmiş, **Lazca (lzz)** konuşma sentezi modeli. Mozilla'nın açık kaynak Lazca veri setleri kullanılarak eğitilmiştir.
 
 | Özellik | Detay |
 |---|---|
 | Dil | Lazca (lzz) |
-| Konuşucu | Tek konuşucu ( Mozilla Lazca veri setinden) |
+| Konuşucu | Tek konuşucu (Mozilla Lazca veri setinden) |
 | Mimari | VoxCPM2 + LoRA (r=32, α=32) |
 | Eğitim verisi | ~21.000 segment |
 | Eğitim adımı | 2.000 |
-| LoRA ağırlıkları | ~70 MB |
+| LoRA ağırlıkları | ~70 MB (18,1M parametre, F32) |
 | Audio sample rate | 16 kHz (giriş) / 48 kHz (çıkış) |
 
 ## ⚡ Hızlı Başlangıç
 
 ```bash
-pip install mozilaz --index-url https://huggingface.co --trusted-host huggingface.co
-```
-
-Ya da doğrudan repo'dan:
-
-```bash
-pip install torch torchaudio soundfile
-pip install voxcpm  # base VoxCPM2 paketi
-pip install -e git+https://huggingface.co/AnadilOrg/MozilLaz.git#egg=mozilaz
-```
-
-### Kolay kurulum (manuel):
-
-```bash
 # 1. Bu repo'yu klonlayın
-git clone https://huggingface.co/AnadilOrg/MozilLaz.git
+git clone https://huggingface.co/Anadilorg/MozilLaz
 cd MozilLaz
 
 # 2. Sanal ortam oluşturun
@@ -38,36 +24,43 @@ python -m venv venv
 source venv/bin/activate
 
 # 3. Gerekli paketleri yükleyin
-pip install torch torchaudio soundfile
-pip install voxcpm
+pip install -r requirements.txt
 
-# 4. Basit inference yapın
-python inference.py
+# 4. Ses üretin (base model ilk seferde otomatik indirilir, ~4.6 GB)
+python inference.py --text "[speaker:spk_tmp_001 language:lzz] Ngolaşa uluri?"
 ```
+
+> **Not:** LoRA yüklemesi `voxcpm` paketinin kendi LoRA desteğiyle yapılır — `peft` gerekmez.
 
 ## 📖 Kullanım
 
 ### Python API ile
 
 ```python
-import torch
+import json
+import numpy as np
 import soundfile as sf
-from voxcpm.model import VoxCPM2Model
-from peft import PeftModel
+from voxcpm import VoxCPM
+from voxcpm.model.voxcpm import LoRAConfig
 
-# 1. Base modeli yükleyin
-base_model = VoxCPM2Model.from_pretrained("openbmb/voxcpm2")
+# 1. LoRA konfigürasyonunu okuyun
+with open("lora_config.json") as f:
+    lc = json.load(f)["lora_config"]
+lora_cfg = LoRAConfig(**{k: v for k, v in lc.items() if k in LoRAConfig.model_fields})
 
-# 2. MozilLaz LoRA adapter'ını yükleyin
-model = PeftModel.from_pretrained(base_model, "MozilLaz/")
-model.eval().to("cuda")
+# 2. Base model + MozilLaz LoRA adapter'ını tek adımda yükleyin
+model = VoxCPM.from_pretrained(
+    "openbmb/VoxCPM2",
+    lora_config=lora_cfg,
+    lora_weights_path="lora_weights.safetensors",
+)
 
 # 3. Ses üretin — Lazca metin
 text = "[speaker:spk_tmp_001 language:lzz] Mehmet manişa dulya komenç̌elu do oxorimuşişa igzalu."
-audio = model.generate(target_text=text, inference_timesteps=10, cfg_value=2.0)
+audio = model.generate(text=text, inference_timesteps=10, cfg_value=2.0)
 
-# 4. Kaydedin
-sf.write("output.wav", audio.cpu().numpy(), 48000)
+# 4. Kaydedin (çıkış 48 kHz)
+sf.write("output.wav", np.asarray(audio).squeeze(), 48000)
 print("✅ Ses üretildi! output.wav dosyasına kaydedildi.")
 ```
 
@@ -81,25 +74,21 @@ texts = [
     "[speaker:spk_tmp_001 language:lzz] Ngolaşa uluri?",
 ]
 
-for text in texts:
-    audio = model.generate(target_text=text, inference_timesteps=10, cfg_value=2.0)
-    sf.write(f"output.wav", audio.cpu().numpy(), 48000)
+for i, text in enumerate(texts):
+    audio = model.generate(text=text, inference_timesteps=10, cfg_value=2.0)
+    sf.write(f"output_{i}.wav", np.asarray(audio).squeeze(), 48000)
 ```
 <audio controls="" src="/Anadilorg/MozilLaz/resolve/main/sample/2.wav"></audio>
 <audio controls="" src="/Anadilorg/MozilLaz/resolve/main/sample/3.wav"></audio>
 
+### Gradio ile tarayıcı demosu
 
-### GRUUI ile demo (Gradio gerektirmez — soundfile ile)
-
-```python
-# CLI kullanım
-python inference.py --text "[speaker:spk_tmp_001 language:lzz] Aya lemşik va duç̌vinasinon." --output result.wav
-
-# Base URL ile (REST API olarak kullanmak isterseniz)
-# model.generate() output 48kHz stereo değil, mono audio tensor döner
+```bash
+pip install gradio
+python demo.py            # http://localhost:7860
+python demo.py --share    # public link
 ```
 <audio controls="" src="/Anadilorg/MozilLaz/resolve/main/sample/4.wav"></audio>
-
 
 ### Command Line
 
@@ -107,10 +96,15 @@ python inference.py --text "[speaker:spk_tmp_001 language:lzz] Aya lemşik va du
 python inference.py \
     --text "[speaker:spk_tmp_001 language:lzz] Xelaǩaoba, manebrape!" \
     --output my_voice.wav \
-    --base-model openbmb/voxcpm2
+    --base-model openbmb/VoxCPM2
 ```
 <audio controls="" src="/Anadilorg/MozilLaz/resolve/main/sample/5.wav"></audio>
 
+### Hızlı doğrulama (smoke test)
+
+```bash
+python test_smoke.py   # ağırlık eşleşmesini ve uçtan uca üretimi doğrular
+```
 
 ## 🏗️ Model Detayları
 
@@ -125,23 +119,26 @@ python inference.py \
 - **Rank (r):** 32
 - **Alpha (α):** 32
 - **Dropout:** 0.0
-- **LM layer'lar:** q_proj, k_proj, v_proj, o_proj
-- **DiT layer'lar:** q_proj, k_proj, v_proj, o_proj
-- **Projeler:** enc_to_lm_proj, lm_to_dit_proj, res_to_dit_proj, fusion_concat_proj
+- **LM katmanları:** q_proj, k_proj, v_proj, o_proj (base LM 28 kat + residual LM 8 kat)
+- **DiT katmanları:** q_proj, k_proj, v_proj, o_proj (12 kat)
+- **Projeksiyon katmanları:** dahil değil (`enable_proj: false`)
+- **Toplam:** 384 tensör, 18.087.936 parametre (F32)
 
 ## 📦 Paket Yapısı
 
 ```
 MozilLaz/
-├── README.md              # Bu dosya
-├── config.json            # Model metadata
-├── lora_config.json       # LoRA hiperparametreler
+├── README.md                 # Bu dosya
+├── model_card.md             # HuggingFace model kartı
+├── config.json               # Model metadata
+├── lora_config.json          # LoRA hiperparametreler
 ├── lora_weights.safetensors  # ~70MB LoRA ağırlıkları
-├── requirements.txt       # Gerekli Python paketleri
-├── inference.py           # Tek dosyada tam inference script
-├── demo.py                # Gradio demo (opsiyonel)
-├── pyproject.toml         # pip install mozilaz için metadata
-└── setup.py               # Alternatif kurulum
+├── requirements.txt          # Gerekli Python paketleri
+├── inference.py              # Tek dosyada tam inference script
+├── demo.py                   # Gradio demo (opsiyonel)
+├── test_smoke.py             # Uçtan uca doğrulama testi
+├── sample/                   # Örnek çıktılar (5 WAV)
+└── LICENSE                   # MIT
 ```
 
 ## 📋 Gereksinimler
@@ -151,11 +148,16 @@ MozilLaz/
 | Python | >= 3.10 |
 | torch | >= 2.0 |
 | torchaudio | >= 2.0 |
-| voxcpm | en son |
-| peft | >= 0.7 |
+| voxcpm | >= 2.0 |
 | safetensors | >= 0.3 |
 | soundfile | >= 0.11 |
-| accelerate | >= 0.21 |
+| numpy | >= 1.24 |
+
+### Donanım
+
+- **Disk:** ~4.7 GB (base model + LoRA)
+- **Bellek:** float32 inference için ~9 GB; CUDA GPU'da bfloat16 ile daha az
+- **GPU:** CUDA önerilir. Apple Silicon (MPS) desteklenir; 16 GB birleşik bellekte çalışır ama swap nedeniyle çok yavaştır (≥24 GB önerilir). CPU çalışır fakat pratik değildir.
 
 ## 🌍 Dil Notu
 
@@ -163,12 +165,12 @@ Lazca (ISO 639-3: **lzz**), Karadeniz bölgesinde konuşulan Kolkis dilidir. Bu 
 
 ## 📝 Lisans
 
-Bu model açık kaynak olarak sunulmuştur. Detaylar için `LICENSE` dosyasına bakın.
+Bu model MIT lisansı altında sunulmuştur. Detaylar için `LICENSE` dosyasına bakın.
 
 ## 🔗 Kaynaklar
 
-- [VoxCPM2 (Base Model)](https://huggingface.co/openbmb/voxcpm2)
-- [LoRA Papers](https://arxiv.org/abs/2106.09685)
+- [VoxCPM2 (Base Model)](https://huggingface.co/openbmb/VoxCPM2)
+- [LoRA Paper](https://arxiv.org/abs/2106.09685)
 - [Mozilla Lazca Dil Projesi](https://mozilladatacollective.com/datasets/cmqinxu0l00ycnr07obbjovk0)
 
 ## 💬 Sorun Bildir

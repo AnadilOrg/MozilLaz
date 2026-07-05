@@ -1,5 +1,5 @@
 {
-  "base_model": "facebook/voxcpm2",
+  "base_model": "openbmb/VoxCPM2",
   "lora_config": {
     "enable_lm": true,
     "enable_dit": true,

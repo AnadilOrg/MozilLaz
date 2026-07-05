@@ -5,151 +5,126 @@ Standalone inference script.
 
 Kullanım:
     python inference.py
-    python inference.py --text "[speaker:spk_tmp_001 language:lzz] Nanışkimi uç den ikayme."
+    python inference.py --text "[speaker:spk_tmp_001 language:lzz] Ngolaşa uluri?"
     python inference.py --text "..." --output ses.wav --device cuda
 
 Model yükleme:
-    1. facebook/voxcpm2 base modeli HuggingFace'den otomatik indirilir
-    2. Bu dizindeki lora_weights.safetensors LoRA adapter uygulanır
-    3. 48kHz Lazca ses üretilir
+    1. openbmb/VoxCPM2 base modeli HuggingFace'den otomatik indirilir (~4.6 GB)
+    2. Bu dizindeki lora_config.json okunarak LoRA katmanları kurulur
+    3. lora_weights.safetensors adapter ağırlıkları yüklenir
+    4. 48 kHz Lazca ses üretilir
+
+Not: LoRA yüklemesi voxcpm paketinin kendi (native) LoRA desteğiyle yapılır;
+peft gerekmez. Doğru giriş noktası `voxcpm.VoxCPM` sınıfıdır.
 """
 
 import argparse
 import json
-import os
 import sys
 import warnings
 from pathlib import Path
 
 import numpy as np
-import safetensors.torch
 import soundfile as sf
 import torch
-import transformers
 
-# Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+DEFAULT_BASE_MODEL = "openbmb/VoxCPM2"
+DEFAULT_TEXT = "[speaker:spk_tmp_001 language:lzz] Ngolaşa uluri?"
 
-def load_config(path: Path) -> dict:
-    """Yüklemek için config.json oku."""
-    with open(path) as f:
+
+def load_json(path: Path) -> dict:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def find_voxcpm_model():
-    """VoxCPM model sınıfını bul (pakete göre farklı import)."""
-    # Deneme: voxcpm2 import
-    try:
-        from voxcpm.model import VoxCPM2Model
-        return VoxCPM2Model
-    except ImportError:
-        pass
-
-    # Deneme: voxcpm import
-    try:
-        from voxcpm.model import VoxCPMModel
-        return VoxCPMModel
-    except ImportError:
-        pass
-
-    return None
+def resolve_device(requested: str) -> str:
+    """auto → cuda > mps > cpu"""
+    if requested != "auto":
+        return requested
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
-def load_model(base_model_name: str, lora_path: Path):
+def load_model(base_model_name: str, lora_config_path: Path, lora_weights_path: Path, device: str):
     """
-    VoxCPM2 base model + LoRA adapter yükle.
+    VoxCPM2 base model + MozilLaz LoRA adapter yükle.
 
-    Args:
-        base_model_name: HuggingFace base model adı (örn. 'facebook/voxcpm2')
-        lora_path: LoRA weights safetensors dosya yolu
-
-    Returns:
-        Loaded model ready for inference
+    voxcpm >= 2.0 API'si: LoRA config ve ağırlık yolu doğrudan
+    `VoxCPM.from_pretrained`e verilir; model kurulurken LoRA katmanları
+    eklenir ve safetensors ağırlıkları yüklenir.
     """
-    if not torch.cuda.is_available():
-        print("⚠️  CUDA bulunamadı. CPU kullanılıyor (çok yavaş olacak).")
-
-    print(f"📦 Base model yükleniyor: {base_model_name}")
-    print("   (İlk seferde HuggingFace'den indirilecek ~4.3GB)")
-
-    model_class = find_voxcpm_model()
-    if model_class is None:
+    try:
+        from voxcpm import VoxCPM
+        from voxcpm.model.voxcpm import LoRAConfig
+    except ImportError:
         print("❌ voxcpm paketi bulunamadı!")
-        print("   pip install voxcpm komutuyla yükleyin.")
+        print("   pip install voxcpm  komutuyla yükleyin (>= 2.0).")
         sys.exit(1)
 
-    # Base model'ı HuggingFace'ten yükle (otomatik indirir)
-    model = model_class.from_pretrained(base_model_name)
+    lc = load_json(lora_config_path).get("lora_config", {})
+    lora_cfg = LoRAConfig(**{k: v for k, v in lc.items() if k in LoRAConfig.model_fields})
 
-    # LoRA adapter'ı yükle
-    print(f"\n🔧 LoRA adapter yükleniyor: {lora_path.name}")
-    model.load_lora(str(lora_path))
+    print(f"📦 Base model yükleniyor: {base_model_name}")
+    print("   (İlk seferde HuggingFace'den ~4.6 GB indirilir)")
 
-    # Inference modu
-    model.eval()
-    if torch.cuda.is_available():
-        model = model.to("cuda")
-        print("🎮 CUDA aktif")
+    model = VoxCPM.from_pretrained(
+        base_model_name,
+        load_denoiser=False,
+        lora_config=lora_cfg,
+        lora_weights_path=str(lora_weights_path),
+        device=device,
+    )
+
+    # Ağırlıkların gerçekten eşleştiğini doğrula
+    loaded, skipped = model.load_lora(str(lora_weights_path))
+    print(f"🔧 LoRA adapter: {len(loaded)} anahtar yüklendi, {len(skipped)} atlandı")
+    if skipped:
+        print(f"⚠️  Atlanan anahtarlar (ilk 5): {skipped[:5]}")
 
     return model
 
 
 def generate_speech(model, text: str, output_path: str,
                     inference_timesteps: int = 10, cfg_value: float = 2.0):
-    """
-    Metinden ses üret ve dosyaya kaydet.
-
-    Args:
-        model: Yüklenmiş VoxCPM2 + LoRA modeli
-        text: Lazca text (speaker tag dahil)
-        output_path: Çıktı WAV dosya yolu
-        inference_timesteps: Samplama adımı sayısı (10 varsayılan)
-        cfg_value: Classifier-free guidance değeri
-    """
+    """Metinden ses üret ve dosyaya kaydet."""
     print(f"\n🎙️  Metin: {text}")
     print("   Ses üretiliyor...")
 
-    # VoxCPM2 generate API
-    with torch.no_grad():
-        audio = model.generate(
-            target_text=text,
-            inference_timesteps=inference_timesteps,
-            cfg_value=cfg_value
-        )
+    audio = model.generate(
+        text=text,
+        inference_timesteps=inference_timesteps,
+        cfg_value=cfg_value,
+    )
+    audio = np.asarray(audio).squeeze()
 
-    # Tensor → numpy
-    if hasattr(audio, "cpu"):
-        audio = audio.cpu()
-    if isinstance(audio, torch.Tensor):
-        audio = audio.squeeze(0).numpy()
-
-    # WAV'a kaydet
-    sf.write(output_path, audio, 48000)
+    sample_rate = getattr(getattr(model, "tts_model", None), "sample_rate", 48000)
+    sf.write(output_path, audio, sample_rate)
     print(f"\n✅ Ses üretildi! → {output_path}")
-    print(f"   Uzunluk: {len(audio)/48000:.2f} saniye")
-    print(f"   Sample rate: 48000 Hz")
+    print(f"   Uzunluk: {len(audio) / sample_rate:.2f} saniye")
+    print(f"   Sample rate: {sample_rate} Hz")
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="MozilLaz — Lazca Text-to-Speech",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 Örnekler:
 
   # Varsayılan Lazca metin ile:
   python inference.py
 
   # Özel metin:
-  python inference.py --text "[speaker:spk_tmp_001 language:lzz] Merhaba."
+  python inference.py --text "[speaker:spk_tmp_001 language:lzz] Xelaǩaoba, manebrape!"
 
-  # CUDA ile (varsayılan):
+  # Cihaz seçimi (varsayılan auto: cuda > mps > cpu):
   python inference.py --device cuda
-
-  # CPU ile (yavaş ama GPU gerekmez):
-  python inference.py --device cpu
 
   # Farklı adımlarla (daha kaliteli ama yavaş):
   python inference.py --timesteps 20
@@ -158,66 +133,43 @@ Lazca metin formatı:
   [speaker:spk_tmp_001 language:lzz] <metin burada>
 
 Speaker: spk_tmp_001 (Mozilla Lazca veri setinden)
+
+Donanım notu:
+  float32 inference ~9 GB bellek ister. CUDA GPU'da bfloat16 ile daha az.
+  16 GB birleşik bellekli Apple Silicon'da çalışır ama swap nedeniyle
+  ÇOK yavaştır; pratik kullanım için CUDA GPU veya >=24 GB önerilir.
 """
     )
-    parser.add_argument(
-        "--text",
-        type=str,
-        default=None,
-        help="Söylemesini istediğiniz Lazca metin"
-    )
-    parser.add_argument(
-        "--output", "-o",
-        type=str,
-        default="mozilaz_output.wav",
-        help="Çıktı WAV dosya yolu (varsayılan: mozilaz_output.wav)"
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        choices=["auto", "cuda", "cpu"],
-        help="Hesaplama cihazı (varsayılan: auto)"
-    )
-    parser.add_argument(
-        "--timesteps",
-        type=int,
-        default=10,
-        help="Inference adım sayısı (10=normal, 20=kaliteli, 5=hızlı)"
-    )
-    parser.add_argument(
-        "--cfg-value",
-        type=float,
-        default=2.0,
-        help="Classifier-free guidance değeri (varsayılan: 2.0)"
-    )
-    parser.add_argument(
-        "--base-model",
-        type=str,
-        default="facebook/voxcpm2",
-        help="Base VoxCPM2 model adı (varsayılan: facebook/voxcpm2)"
-    )
-    parser.add_argument(
-        "--lora-path",
-        type=str,
-        default=None,
-        help="LoRA weights yolu (varsayılan: bu dizindeki lora_weights.safetensors)"
-    )
+    parser.add_argument("--text", type=str, default=DEFAULT_TEXT,
+                        help="Söylemesini istediğiniz Lazca metin")
+    parser.add_argument("--output", "-o", type=str, default="mozilaz_output.wav",
+                        help="Çıktı WAV dosya yolu (varsayılan: mozilaz_output.wav)")
+    parser.add_argument("--device", type=str, default="auto",
+                        choices=["auto", "cuda", "mps", "cpu"],
+                        help="Hesaplama cihazı (varsayılan: auto)")
+    parser.add_argument("--timesteps", type=int, default=10,
+                        help="Inference adım sayısı (10=normal, 20=kaliteli, 5=hızlı)")
+    parser.add_argument("--cfg-value", type=float, default=2.0,
+                        help="Classifier-free guidance değeri (varsayılan: 2.0)")
+    parser.add_argument("--base-model", type=str, default=DEFAULT_BASE_MODEL,
+                        help=f"Base VoxCPM2 model adı (varsayılan: {DEFAULT_BASE_MODEL})")
+    parser.add_argument("--lora-path", type=str, default=None,
+                        help="LoRA weights yolu (varsayılan: bu dizindeki lora_weights.safetensors)")
 
     args = parser.parse_args()
 
-    # LoRA yolu
     script_dir = Path(__file__).parent
-    lora_path = Path(args.lora_path) if args.lora_path else script_dir / "lora_weights.safetensors"
+    lora_weights = Path(args.lora_path) if args.lora_path else script_dir / "lora_weights.safetensors"
+    lora_config = script_dir / "lora_config.json"
 
-    if not lora_path.exists():
-        print(f"❌ LoRA weights dosyası bulunamadı: {lora_path}")
-        sys.exit(1)
+    for p, ad in [(lora_weights, "LoRA weights"), (lora_config, "lora_config.json")]:
+        if not p.exists():
+            print(f"❌ {ad} dosyası bulunamadı: {p}")
+            sys.exit(1)
 
-    # Config
     config_path = script_dir / "config.json"
     if config_path.exists():
-        config = load_config(config_path)
+        config = load_json(config_path)
         print("=" * 60)
         print("  MozilLaz — Lazca Text-to-Speech Modeli")
         print("  " + "=" * 43)
@@ -229,28 +181,17 @@ Speaker: spk_tmp_001 (Mozilla Lazca veri setinden)
         print(f"  Training steps: {config.get('training', {}).get('steps', 2000)}")
         print("=" * 60)
 
-    # Metin
-    if args.text is None:
-        args.text = "[speaker:spk_tmp_001 language:lzz] Nanışkimi uç den ikayme."
-
-    # Cihaz
-    device = args.device
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
+    device = resolve_device(args.device)
     print(f"\n🚀 {device.upper()} üzerinde çalışıyor...")
-    print(f"📝 Metin: {args.text}")
 
-    # Model yükle
-    model = load_model(args.base_model, lora_path)
+    model = load_model(args.base_model, lora_config, lora_weights, device)
 
-    # Ses üret
     generate_speech(
         model,
         text=args.text,
         output_path=args.output,
         inference_timesteps=args.timesteps,
-        cfg_value=args.cfg_value
+        cfg_value=args.cfg_value,
     )
 
 
