@@ -1,0 +1,32 @@
+{
+  "name": "MozilLaz",
+  "language": "lzz",
+  "language_name": "Lazuri (Lazca)",
+  "trainer": "voxcpm2",
+  "base_model": "facebook/voxcpm2",
+  "speakers": ["spk_tmp_001"],
+  "lora_config": {
+    "r": 32,
+    "alpha": 32,
+    "dropout": 0.0,
+    "enable_lm": true,
+    "enable_dit": true,
+    "enable_proj": false,
+    "target_modules_lm": ["q_proj", "v_proj", "k_proj", "o_proj"],
+    "target_modules_dit": ["q_proj", "v_proj", "k_proj", "o_proj"],
+    "target_proj_modules": ["enc_to_lm_proj", "lm_to_dit_proj", "res_to_dit_proj", "fusion_concat_proj"]
+  },
+  "training": {
+    "steps": 2000,
+    "learning_rate": 0.0001,
+    "batch_size": 2,
+    "gradient_accumulation": 8,
+    "warmup_steps": 100,
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0
+  },
+  "dataset": {
+    "entries": 21071,
+    "source": "Mozilla Lazca açık kaynak veri setleri"
+  }
+}
